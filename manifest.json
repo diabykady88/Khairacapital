@@ -1,0 +1,26 @@
+{
+  "name": "KHAIRA · Capital",
+  "short_name": "KHAIRA",
+  "description": "Poste de pilotage financier personnel — dettes, placements, Zakat, agenda",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FBFAF5",
+  "theme_color": "#0E5C43",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
