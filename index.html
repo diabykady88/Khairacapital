@@ -384,7 +384,8 @@ function KhairaFinances() {
   );
   const totalDepensesMois = depensesMois.reduce((s, t) => s + t.montant, 0);
   const depensesCarteMois = depensesMois.filter((t) => t.carte).reduce((s, t) => s + t.montant, 0);
-  const depensesComptantMois = totalDepensesMois - depensesCarteMois;
+  const depensesEnvMois = depensesMois.filter((t) => t.enveloppe && !t.carte).reduce((s, t) => s + t.montant, 0);
+  const depensesComptantMois = totalDepensesMois - depensesCarteMois - depensesEnvMois;
   const interetsMensuelsActuels = data.dettes.reduce((s, d) => s + (d.solde * (d.taux || 0)) / 100 / 12, 0);
   const payeCeMois = useMemo(() => {
     const m = {};
@@ -499,6 +500,33 @@ function KhairaFinances() {
         return { ...d, mvtInvest: mvts, fiscal, fils: { ...d.fils, reee: { ...d.fils.reee, solde: Math.max(0, (d.fils.reee.solde || 0) + delta) } } };
       return { ...d, mvtInvest: mvts, fiscal, investissements: d.investissements.map((a) => (a.id === cible.id ? { ...a, solde: Math.max(0, a.solde + delta) } : a)) };
     });
+  };
+
+  const retirerEnveloppe = (env) => {
+    const m = lireMontant(prompt(`Montant à retirer de « ${env.nom} » :`)) || 0;
+    if (m <= 0) return;
+    const listeCat = data.categories.map((c, i) => `${i + 1}. ${c}`).join("\n");
+    const rep = prompt(`C’était pour quelle dépense ? Tape le numéro — ou laisse vide si c’est un simple transfert :\n${listeCat}`);
+    const cat = data.categories[parseInt(rep || "0") - 1];
+    setData((d) => ({
+      ...d,
+      enveloppes: d.enveloppes.map((x) => (x.id === env.id ? { ...x, solde: Math.max(0, x.solde - m) } : x)),
+      depenses: cat ? [{ id: uid(), nom: env.nom, montant: m, categorie: cat, enveloppe: true, date: isoLocal() }, ...d.depenses] : d.depenses,
+    }));
+  };
+
+  const supprimerDepense = (t) => {
+    if (!t) return;
+    if (t.carte && t.detteNom && data.dettes.some((x) => x.nom === t.detteNom)) {
+      if (!window.confirm(`Supprimer cette dépense ET retirer ${fmt(t.montant)} du solde de « ${t.detteNom} » ?\n(Annuler = ne rien faire)`)) return;
+      setData((d) => ({
+        ...d,
+        depenses: d.depenses.filter((x) => x.id !== t.id),
+        dettes: d.dettes.map((x) => (x.nom === t.detteNom ? { ...x, solde: Math.max(0, x.solde - t.montant) } : x)),
+      }));
+      return;
+    }
+    maj({ depenses: data.depenses.filter((x) => x.id !== t.id) });
   };
 
   const supprimerMvt = (mvt) => {
@@ -659,11 +687,17 @@ function KhairaFinances() {
   const majEnv = (id, patch) => maj({ enveloppes: data.enveloppes.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
 
   /* ----- Nouvelle dépense ----- */
-  const [nd, setNd] = useState({ nom: "", montant: "", categorie: "Nourriture", moyen: "debit", date: isoLocal() });
+  const [nd, setNd] = useState({ nom: "", montant: "", categorie: "Nourriture", moyen: "debit", carteId: "", date: isoLocal() });
   const ajouterDepense = () => {
     if (!nd.montant) return;
     const montant = parseFloat(nd.montant);
-    maj({ depenses: [{ id: uid(), nom: nd.nom || nd.categorie, montant, categorie: nd.categorie, carte: nd.moyen === "carte", date: nd.date }, ...data.depenses] });
+    const carteChoisie = nd.moyen === "carte" ? data.dettes.find((x) => x.id === nd.carteId) || data.dettes.find((x) => x.dansBudget && x.solde >= 0) : null;
+    setData((d) => ({
+      ...d,
+      depenses: [{ id: uid(), nom: nd.nom || nd.categorie, montant, categorie: nd.categorie, carte: nd.moyen === "carte", detteNom: carteChoisie ? carteChoisie.nom : undefined, date: nd.date }, ...d.depenses],
+      dettes: carteChoisie ? d.dettes.map((x) => (x.id === carteChoisie.id ? { ...x, solde: x.solde + montant } : x)) : d.dettes,
+      mouvements: carteChoisie ? [{ id: uid(), date: nd.date, detteNom: carteChoisie.nom, type: "achat", montant }, ...(d.mouvements || [])].slice(0, 300) : d.mouvements,
+    }));
     const plafond = (data.budgets || {})[nd.categorie] || 0;
     if (plafond > 0 && nd.date?.startsWith(moisKey())) {
       const total = (depCatCourant[nd.categorie] || 0) + montant;
@@ -705,10 +739,19 @@ function KhairaFinances() {
   const logMouvement = (dette, type) => {
     const v = lireMontant(prompt(type === "achat" ? `Montant de l’achat sur « ${dette.nom} » :` : `Montant du paiement passé sur « ${dette.nom} » :`)) || 0;
     if (!v || v <= 0) return;
+    let depense = null;
+    if (type === "achat") {
+      const desc = prompt("Description de l’achat (ex. IGA, Amazon…) :") || "Achat carte";
+      const listeCat = data.categories.map((c, i) => `${i + 1}. ${c}`).join("\n");
+      const numCat = parseInt(prompt(`Catégorie ? Tape le numéro :\n${listeCat}`) || "0");
+      const cat = data.categories[numCat - 1] || "Autre";
+      depense = { id: uid(), nom: desc, montant: v, categorie: cat, carte: true, detteNom: dette.nom, date: isoLocal() };
+    }
     setData((d) => ({
       ...d,
       dettes: d.dettes.map((x) => (x.id === dette.id ? { ...x, solde: Math.max(0, x.solde + (type === "achat" ? v : -v)) } : x)),
       mouvements: [{ id: uid(), date: isoLocal(), detteNom: dette.nom, type, montant: v }, ...(d.mouvements || [])].slice(0, 300),
+      depenses: depense ? [depense, ...d.depenses] : d.depenses,
     }));
   };
 
@@ -837,6 +880,17 @@ function KhairaFinances() {
           }));
           return;
         }
+      }
+    }
+    // Cocher une entrée de mon fils (pension, allocations) → créditer son compte Desjardins
+    if (!dejaFait && e.type === "fils" && e.montant > 0) {
+      if (window.confirm(`Ajouter ${fmt(e.montant)} au compte Desjardins de ton fils ?`)) {
+        setData((d) => ({
+          ...d,
+          faits: { ...(d.faits || {}), [e.cle]: true },
+          fils: { ...d.fils, compte: { ...(d.fils.compte || {}), solde: ((d.fils.compte || {}).solde || 0) + e.montant } },
+        }));
+        return;
       }
     }
     maj({ faits: { ...(data.faits || {}), [e.cle]: !dejaFait } });
@@ -1245,7 +1299,7 @@ function KhairaFinances() {
                   <b style={{ color: resteMensuel >= 0 ? C.emerald : C.clay }}>{fmt(resteMensuel)}</b>
                 </div>
               </div>
-              <p className="kh-min" style={{ marginTop: 10 }}>⚠ Si ton REER est déjà prélevé à la source, ta paie nette l’exclut déjà : mets sa fréquence sur « déjà prélevé » dans l’onglet Investissements pour ne pas le compter deux fois. De même, une dépense marquée « carte de crédit » n’est pas soustraite ici : son argent sort déjà par le budget cartes ({fmt(data.budgetCartes)}). Ce mois-ci, {fmt(depensesCarteMois)} de tes dépenses sont sur cartes.</p>
+              <p className="kh-min" style={{ marginTop: 10 }}>⚠ Si ton REER est déjà prélevé à la source, ta paie nette l’exclut déjà : mets sa fréquence sur « déjà prélevé » dans l’onglet Investissements pour ne pas le compter deux fois. De même, une dépense marquée « carte de crédit » n’est pas soustraite ici : son argent sort déjà par le budget cartes ({fmt(data.budgetCartes)}). Ce mois-ci, {fmt(depensesCarteMois)} de tes dépenses sont sur cartes. Les dépenses payées depuis une enveloppe (🧧) ne sont pas soustraites non plus — leur argent était déjà mis de côté.</p>
             </Carte>
 
             <Carte sur="Mémoire" titre="Ta valeur nette, mois après mois">
@@ -1789,6 +1843,13 @@ function KhairaFinances() {
                     <option value="carte">Carte de crédit 💳</option>
                   </select>
                 </label>
+                {nd.moyen === "carte" && (
+                  <label className="kh-champ"><span className="kh-champ-label">Sur quelle carte ?</span>
+                    <select value={nd.carteId || (data.dettes.find((x) => x.dansBudget)?.id ?? "")} onChange={(e) => setNd({ ...nd, carteId: e.target.value })}>
+                      {data.dettes.filter((x) => x.dansBudget).map((x) => <option key={x.id} value={x.id}>{x.nom}</option>)}
+                    </select>
+                  </label>
+                )}
                 <label className="kh-champ"><span className="kh-champ-label">Date</span>
                   <input type="date" value={nd.date} onChange={(e) => setNd({ ...nd, date: e.target.value })} />
                 </label>
@@ -1864,9 +1925,9 @@ function KhairaFinances() {
                 <div key={t.id} className="kh-tx">
                   <span className="kh-tx-date">{t.date?.slice(8)}·{t.date?.slice(5, 7)}</span>
                   <span className="kh-tx-nom">{t.nom}</span>
-                  <span className="kh-cat-chip" style={{ margin: 0 }}>{t.categorie}{t.carte ? " · 💳" : ""}</span>
+                  <span className="kh-cat-chip" style={{ margin: 0 }}>{t.categorie}{t.carte ? " · 💳" : t.enveloppe ? " · 🧧" : ""}</span>
                   <b>{fmt2(t.montant)}</b>
-                  <button className="kh-suppr" onClick={() => maj({ depenses: data.depenses.filter((x) => x.id !== t.id) })}>✕</button>
+                  <button className="kh-suppr" onClick={() => supprimerDepense(t)}>✕</button>
                 </div>
               )) : <p className="kh-vide">Rien pour l’instant ce mois-ci.</p>}
             </Carte>
@@ -2091,7 +2152,7 @@ function KhairaFinances() {
                   <span className="kh-tx-nom">{t.nom || (t.type === "entree" ? "Entrée" : "Dépense")}{t.src === "dep" ? <em style={{ fontStyle: "normal", fontSize: 11, color: C.soft }}> · via Dépenses{t.carte ? " 💳" : ""}{t.carte && t.rembourse ? " · remboursée ✓" : ""}</em> : ""}</span>
                   <span className="kh-cat-chip" style={{ margin: 0, background: t.type === "entree" ? C.emeraldSoft : C.claySoft, color: t.type === "entree" ? C.emerald : C.clay }}>{t.type === "entree" ? "Entrée" : "Dépense"}</span>
                   <b style={{ color: t.type === "entree" ? C.emerald : C.clay }}>{t.type === "entree" ? "+" : "−"} {fmt2(t.montant)}</b>
-                  <button className="kh-suppr" onClick={() => t.src === "dep" ? maj({ depenses: data.depenses.filter((x) => x.id !== t.id) }) : maj({ fils: { ...data.fils, transactions: data.fils.transactions.filter((x) => x.id !== t.id) } })}>✕</button>
+                  <button className="kh-suppr" onClick={() => t.src === "dep" ? supprimerDepense(data.depenses.find((x) => x.id === t.id)) : maj({ fils: { ...data.fils, transactions: data.fils.transactions.filter((x) => x.id !== t.id) } })}>✕</button>
                 </div>
               )) : <p className="kh-vide">Note ici ses dépenses (vêtements, activités, école…) et toute entrée ponctuelle. Les dépenses saisies en catégorie « Mon fils » dans l’onglet Dépenses apparaissent ici automatiquement.</p>}
             </Carte>
@@ -2123,7 +2184,7 @@ function KhairaFinances() {
                     </div>
                     <div className="kh-env-actions">
                       <button className="kh-btn kh-btn-mini" onClick={() => { const m = lireMontant(prompt("Montant à déposer :")) || 0; if (m > 0) majEnv(e.id, { solde: e.solde + m }); }}>+ Déposer</button>
-                      <button className="kh-btn kh-btn-mini" onClick={() => { const m = lireMontant(prompt("Montant à retirer :")) || 0; if (m > 0) majEnv(e.id, { solde: Math.max(0, e.solde - m) }); }}>− Retirer</button>
+                      <button className="kh-btn kh-btn-mini" onClick={() => retirerEnveloppe(e)}>− Retirer</button>
                     </div>
                     <Champ type="text" label="Note" value={e.note || ""} onChange={(v) => majEnv(e.id, { note: v })} w={220} />
                   </Carte>
@@ -2438,7 +2499,6 @@ function CloudGate() {
 }
 
 ReactDOM.createRoot(document.getElementById("racine")).render(<CloudGate />);
-
 </script>
 <script>
 if ("serviceWorker" in navigator) {
