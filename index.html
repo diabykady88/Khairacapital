@@ -84,6 +84,8 @@ const DEFAUT = {
     { id: uid(), nom: "Téléphone — ancien loyer + actuel", solde: 400, limite: 0, taux: 0, minimum: 0, paiement: 60, dansBudget: false, jourReleve: 0, jourEcheance: 0 },
   ],
   faits: {},
+  jalons: {},
+  jalonsVus: {},
   analyse: null,
   detteInitiale: 26000,
   budgetCartes: 1300,
@@ -620,6 +622,27 @@ function KhairaFinances() {
     ? zakatProjection[Math.min(12, Math.max(0, Math.round(joursAvantHawl / 30.44)))]?.["Zakat estimée"] ?? montantZakat
     : null;
   const totalZakatVersee = (zk.paiements || []).reduce((s, p) => s + p.montant, 0);
+
+  /* ----- Jalons : détecter et mémoriser chaque victoire ----- */
+  useEffect(() => {
+    if (!loaded) return;
+    const j = { ...(data.jalons || {}) };
+    let changed = false;
+    data.dettes.filter((d) => d.dansBudget && d.limite > 0 && d.solde <= 0).forEach((d) => {
+      const k = "carte:" + d.nom;
+      if (!j[k]) { j[k] = isoLocal(); changed = true; }
+    });
+    if (cartesLimitees.length > 0 && utilisationGlobale <= data.seuilUtil && !j["util"]) { j["util"] = isoLocal(); changed = true; }
+    if (detteTotale > 0 && detteTotale <= (data.detteInitiale || 0) / 2 && !j["moitie"]) { j["moitie"] = isoLocal(); changed = true; }
+    if (detteTotale <= 0.5 && (data.detteInitiale || 0) > 0 && !j["libre"]) { j["libre"] = isoLocal(); changed = true; }
+    if (changed) maj({ jalons: j });
+  }, [loaded, detteTotale, utilisationGlobale, data.dettes]);
+  const jalonsNonVus = Object.entries(data.jalons || {}).filter(([k]) => !(data.jalonsVus || {})[k]);
+  const libelleJalon = (k) =>
+    k === "util" ? `Toutes tes cartes sont sous ${data.seuilUtil} % d’utilisation — ta cote va respirer` :
+    k === "moitie" ? `La MOITIÉ de ta dette de départ (${fmt(data.detteInitiale)}) est effacée` :
+    k === "libre" ? "LIBÉRÉE. Zéro dette. Le jour que tout ce travail visait." :
+    `${k.replace("carte:", "")} est payée à ZÉRO`;
 
   /* ----- Instantané mensuel de valeur nette (historique automatique) ----- */
   useEffect(() => {
@@ -1196,6 +1219,42 @@ function KhairaFinances() {
               </Carte>
             )}
 
+            {jalonsNonVus.length > 0 && (
+              <Carte sur="Victoire" titre="🎉 Jalon franchi !" accent={C.brass} style={{ borderColor: C.brass, boxShadow: `0 0 0 2px ${C.brass}`, background: C.brassSoft }}>
+                {jalonsNonVus.map(([k, d]) => (
+                  <p key={k} style={{ margin: "6px 0", fontSize: 15.5, fontFamily: "'Fraunces', Georgia, serif", color: C.night }}>✦ {libelleJalon(k)} <span className="kh-min">— le {d}</span></p>
+                ))}
+                <p className="kh-min" style={{ margin: "8px 0 10px" }}>Chaque case cochée, chaque paiement au bon moment t’a menée ici. Marque le coup — un thé, une prière de gratitude, un message à quelqu’un qui compte — puis on continue.</p>
+                <button className="kh-btn kh-btn-plein" onClick={() => maj({ jalonsVus: { ...(data.jalonsVus || {}), ...Object.fromEntries(jalonsNonVus.map(([k]) => [k, true])) } })}>J’ai célébré ✓</button>
+              </Carte>
+            )}
+
+            {(() => {
+              const jour = new Date().getDate();
+              if (jour < 25 && jour > 3) return null;
+              const mk = moisKey();
+              const items = [
+                "Soldes des cartes mis à jour depuis les relevés",
+                "⟳ Marché passé sur REER, CELIAPP, CELI et REEE",
+                "Cote(s) de crédit notée(s) (TransUnion, Equifax, Coach BMO)",
+                "Nouvelle analyse de Fab générée",
+                "Sauvegarde Coffre-fort copiée dans une note",
+              ];
+              const cles = items.map((it) => `cloture-${mk}|${it}`);
+              const faitsN = cles.filter((c) => (data.faits || {})[c]).length;
+              return (
+                <Carte sur="Rituel de clôture" titre={`Fermer le mois proprement — ${faitsN}/${items.length}`} accent={faitsN === items.length ? C.emerald : C.brass}>
+                  {items.map((it, i) => (
+                    <div key={it} className="kh-ag-evt" style={{ gridTemplateColumns: "22px 1fr", opacity: (data.faits || {})[cles[i]] ? 0.5 : 1 }}>
+                      <input type="checkbox" checked={!!(data.faits || {})[cles[i]]} onChange={() => maj({ faits: { ...(data.faits || {}), [cles[i]]: !(data.faits || {})[cles[i]] } })} />
+                      <span style={{ textDecoration: (data.faits || {})[cles[i]] ? "line-through" : "none" }}>{it}</span>
+                    </div>
+                  ))}
+                  <p className="kh-min" style={{ marginTop: 8 }}>{faitsN === items.length ? "Mois fermé avec rigueur — tes chiffres et la réalité sont parfaitement alignés. ✓" : "10 minutes, relevés en main, en fin de mois — c’est ce rituel qui rend tous les calculs vrais."}</p>
+                </Carte>
+              );
+            })()}
+
             <Carte sur="Ton conseiller intégré" titre="L’analyse de Fab — sur tes vrais chiffres" accent={C.brass}>
               {data.analyse?.texte && <div className="kh-analyse">{data.analyse.texte}</div>}
               <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: data.analyse ? 12 : 0 }}>
@@ -1526,7 +1585,7 @@ function KhairaFinances() {
                   <label className="kh-champ"><span className="kh-champ-label">Mois</span><input type="month" value={ns.mois} onChange={(e) => setNs({ ...ns, mois: e.target.value })} /></label>
                   <label className="kh-champ"><span className="kh-champ-label">Bureau</span>
                     <select value={ns.bureau} onChange={(e) => setNs({ ...ns, bureau: e.target.value })}>
-                      <option>TransUnion</option><option>Equifax</option>
+                      <option>TransUnion</option><option>Equifax</option><option>Coach crédit BMO</option>
                     </select>
                   </label>
                   <Champ label="Cote" value={ns.score} onChange={(v) => setNs({ ...ns, score: v })} w={80} />
@@ -1542,6 +1601,7 @@ function KhairaFinances() {
                       <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
                       <Line type="monotone" dataKey="TransUnion" stroke={C.emerald} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
                       <Line type="monotone" dataKey="Equifax" stroke={C.brass} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
+                      <Line type="monotone" dataKey="Coach crédit BMO" stroke={C.clay} strokeWidth={2.5} connectNulls dot={{ r: 4 }} />
                     </LineChart>
                   </ResponsiveContainer>
                 ) : <p className="kh-vide">Ajoute ta cote actuelle (TransUnion et/ou Equifax) — tu verras la courbe monter pendant que l’utilisation descend.</p>}
