@@ -18,6 +18,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
 <style>html, body { margin: 0; padding: 0; background: #FBFAF5; }</style>
+<script>window.__KHAIRA_WEB__ = true;</script>
 </head>
 <body>
 <div id="racine"></div>
@@ -85,6 +86,19 @@ const DEFAUT = {
   ],
   faits: {},
   jalons: {},
+  tontine: {
+    actif: true,
+    nom: "Tontine 10 mains",
+    debut: "2026-09-20",      // 1er dimanche de cotisation
+    cotisation: 200,          // chaque dimanche
+    cotisationCloture: 400,   // le dimanche qui clôt chaque cycle de 4 semaines
+    nbCycles: 10,
+    recus: [
+      { id: "tr1", date: "2026-10-11", montant: 5000, note: "1re main" },
+      { id: "tr2", date: "2027-04-25", montant: 5000, note: "2e main" },
+    ],
+    versements: {},           // dimanche ISO → true quand payé
+  },
   jalonsVus: {},
   analyse: null,
   detteInitiale: 26000,
@@ -191,7 +205,7 @@ function planifierDettes(dettesIn, budget, seuil = 30) {
     // 2) Phase 1 : cartes au-dessus du seuil, taux les plus élevés d'abord
     const surSeuil = ds
       .filter((d) => d.dansBudget && d.limite > 0 && d.solde / d.limite > seuil / 100)
-      .sort((a, b) => b.taux - a.taux);
+      .sort((a, b) => (b.taux - a.taux) || ((a.solde - (seuil / 100) * a.limite) - (b.solde - (seuil / 100) * b.limite)));
     for (const d of surSeuil) {
       if (pool <= 0) break;
       const cible = (seuil / 100) * d.limite;
@@ -201,7 +215,7 @@ function planifierDettes(dettesIn, budget, seuil = 30) {
       alloc[d.id] = (alloc[d.id] || 0) + p;
     }
     // 3) Phase 2 : avalanche
-    const ordre = ds.filter((d) => d.dansBudget && d.solde > 0.5).sort((a, b) => b.taux - a.taux);
+    const ordre = ds.filter((d) => d.dansBudget && d.solde > 0.5).sort((a, b) => (b.taux - a.taux) || (a.solde - b.solde));
     for (const d of ordre) {
       if (pool <= 0) break;
       const p = Math.min(pool, d.solde);
@@ -243,6 +257,17 @@ const prochaineOccurrence = (jour) => {
   if (d < t) d = construire(t.getFullYear(), t.getMonth() + 1);
   return d;
 };
+const dernierReleveIso = (jour) => {
+  if (!jour || jour < 1) return null;
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  const c = (an, mois) => new Date(an, mois, Math.min(jour, new Date(an, mois + 1, 0).getDate()));
+  let d = c(t.getFullYear(), t.getMonth());
+  if (d > t) d = c(t.getFullYear(), t.getMonth() - 1);
+  return isoLocal(d);
+};
+// Minimum d'une carte au Québec : 5 % du solde (au moins 10 $), ou le solde entier s'il est de 10 $ ou moins
+const minQuebec = (solde) => (solde <= 0 ? 0 : solde <= 10 ? Math.ceil(solde * 100) / 100 : Math.max(10, Math.ceil(solde * 0.05)));
+const estCarteCredit = (d) => !!d.dansBudget && d.limite > 0 && !/marge/i.test(d.nom || "");
 const fmtJour = (d) => (d ? `${d.getDate()} ${NOMS_MOIS[d.getMonth()]}` : "");
 const moinsJours = (d, n) => { const x = new Date(d); x.setDate(x.getDate() - n); return x; };
 const JOURS_SEM = ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."];
@@ -330,6 +355,7 @@ function KhairaFinances() {
         if (r && r.value) {
           const parsed = JSON.parse(r.value);
           const dettesMig = (parsed.dettes || DEFAUT.dettes).map((d) => ({
+            minAuto: estCarteCredit({ dansBudget: d.taux >= 5, ...d }),
             limite: 0,
             minimum: d.taux >= 5 ? Math.max(25, Math.round((d.solde || 0) * 0.03)) : 0,
             dansBudget: d.taux >= 5,
@@ -344,7 +370,7 @@ function KhairaFinances() {
             freq: (a.nom || "").toUpperCase().includes("REER") && a.freq === "paie" ? "preleve" : a.freq,
           }));
           const filsMig = { ...DEFAUT.fils, ...parsed.fils, reee: { ...DEFAUT.fils.reee, depuis: isoLocal(), ...(parsed.fils && parsed.fils.reee ? parsed.fils.reee : {}) } };
-          setData({ ...DEFAUT, ...parsed, dettes: dettesMig, investissements: investMig, profil: { ...DEFAUT.profil, ...parsed.profil }, fils: filsMig, regime: { ...DEFAUT.regime, ...parsed.regime }, zakat: { ...DEFAUT.zakat, ...parsed.zakat }, fiscal: { ...DEFAUT.fiscal, ...parsed.fiscal } });
+          setData({ ...DEFAUT, ...parsed, dettes: dettesMig, investissements: investMig, profil: { ...DEFAUT.profil, ...parsed.profil }, fils: filsMig, regime: { ...DEFAUT.regime, ...parsed.regime }, zakat: { ...DEFAUT.zakat, ...parsed.zakat }, fiscal: { ...DEFAUT.fiscal, ...parsed.fiscal }, tontine: { ...DEFAUT.tontine, ...(parsed.tontine || {}) } });
           if (parsed?.profil?.pin) setVerrou(true);
         }
       } catch (e) { /* première visite */ }
@@ -369,6 +395,11 @@ function KhairaFinances() {
   /* ----- calculs globaux ----- */
   const revenuMensuel = (data.profil.paieNette * 26) / 12;
   const detteTotale = data.dettes.reduce((s, d) => s + d.solde, 0);
+  const soldesPerimes = data.dettes.filter((d) => {
+    if (!d.dansBudget || d.solde <= 0) return false;
+    const dr = dernierReleveIso(d.jourReleve);
+    return dr && (!d.majLe || d.majLe < dr);
+  });
   const minimumsCartes = data.dettes.filter((d) => d.dansBudget && d.solde > 0).reduce((s, d) => s + (d.minimum || 0), 0);
   const paiementsHorsBudget = data.dettes.filter((d) => !d.dansBudget && d.solde > 0).reduce((s, d) => s + (d.paiement || 0), 0);
   const cartesLimitees = data.dettes.filter((d) => d.dansBudget && d.limite > 0);
@@ -378,7 +409,35 @@ function KhairaFinances() {
   const investTotal = data.investissements.reduce((s, a) => s + a.solde, 0);
   const enveloppesTotal = data.enveloppes.reduce((s, e) => s + e.solde, 0);
   const actifs = investTotal + enveloppesTotal + (data.regime.estimationActuelle || 0) + (data.fils.reee.solde || 0);
-  const valeurNette = actifs - detteTotale;
+  /* ----- TONTINE : calendrier, versements, position nette ----- */
+  const tn = data.tontine || DEFAUT.tontine;
+  const majTontine = (patch) => maj({ tontine: { ...tn, ...patch } });
+  const tontineCal = useMemo(() => {
+    if (!tn.debut) return [];
+    const out = [];
+    const d0 = new Date(tn.debut + "T00:00:00");
+    for (let i = 0; i < (tn.nbCycles || 0) * 4; i++) {
+      const d = new Date(d0); d.setDate(d0.getDate() + i * 7);
+      const cloture = i % 4 === 3;
+      out.push({ iso: isoLocal(d), d, cycle: Math.floor(i / 4) + 1, cloture, montant: cloture ? (tn.cotisationCloture || 0) : (tn.cotisation || 0) });
+    }
+    return out;
+  }, [tn.debut, tn.nbCycles, tn.cotisation, tn.cotisationCloture]);
+  const auj = isoLocal();
+  const tontinePrevu = tontineCal.reduce((s, x) => s + x.montant, 0);
+  const tontineVerse = tontineCal.filter((x) => (tn.versements || {})[x.iso]).reduce((s, x) => s + x.montant, 0);
+  const tontineRetards = tontineCal.filter((x) => x.iso < auj && !(tn.versements || {})[x.iso]);
+  const tontineRecu = (tn.recus || []).filter((r) => r.date <= auj).reduce((s, r) => s + (r.montant || 0), 0);
+  const tontineAVenirRecu = (tn.recus || []).filter((r) => r.date > auj).reduce((s, r) => s + (r.montant || 0), 0);
+  const tontineResteAVerser = Math.max(0, tontinePrevu - tontineVerse);
+  // Position nette : ce que la tontine te devra encore (+) ou ce que tu lui dois encore (−)
+  const tontineNette = tontineAVenirRecu - tontineResteAVerser;
+  const tontineProchaine = tontineCal.find((x) => x.iso >= auj && !(tn.versements || {})[x.iso]);
+  const tontineProchainRecu = (tn.recus || []).filter((r) => r.date > auj).sort((a, b) => a.date.localeCompare(b.date))[0];
+  const fmtIso = (iso) => { if (!iso) return ""; const d = new Date(iso + "T00:00:00"); return `${d.getDate()} ${NOMS_MOIS[d.getMonth()]} ${d.getFullYear()}`; };
+  const tontineActive = tn.actif !== false && tontineCal.length > 0 && tontineCal[tontineCal.length - 1].iso >= auj;
+  const tontineMensuel = tontineActive ? (tontinePrevu / Math.max(1, tontineCal.length)) * (365.25 / 12 / 7) : 0;
+  const valeurNette = actifs - detteTotale + (tn.actif !== false ? tontineNette : 0);
 
   const depensesMois = useMemo(
     () => data.depenses.filter((t) => t.date?.startsWith(moisKey())),
@@ -548,9 +607,25 @@ function KhairaFinances() {
   const fiscal = data.fiscal || DEFAUT.fiscal;
   const guideRetour = (m) => {
     if (!m || m <= 0) return null;
-    const chaude = [...data.dettes].filter((d) => d.solde > 0 && d.taux >= 15).sort((a, b) => b.taux - a.taux)[0];
+    const seuilG = (data.seuilUtil || 30) / 100;
+    const chaudes = [...data.dettes]
+      .filter((d) => d.solde > 0.5 && d.taux >= 15)
+      .sort((a, b) => (b.taux - a.taux) || ((a.solde - seuilG * (a.limite || 0)) - (b.solde - seuilG * (b.limite || 0))));
     const fu = data.enveloppes.find((e) => e.nom.toLowerCase().includes("urgence"));
-    if (chaude) return { titre: `Ta priorité : la dette à ${chaude.taux} % — aucun placement ne bat ce rendement garanti.`, lignes: [[`70 % → ${chaude.nom}`, m * 0.7], ["20 % → Fonds d’urgence", m * 0.2], ["10 % → plaisir (toi et ton fils)", m * 0.1]] };
+    if (chaudes.length) {
+      // 70 % vers les dettes chères, dans l'ordre, sans jamais dépasser le solde de chacune
+      let reste = m * 0.7;
+      const lignes = [];
+      for (const d of chaudes) {
+        if (reste <= 0.5) break;
+        const p = Math.min(reste, d.solde);
+        lignes.push([`→ ${d.nom} (${String(d.taux).replace(".", ",")} %)${p >= d.solde - 0.5 ? " — soldée ✓" : ""}`, p]);
+        reste -= p;
+      }
+      lignes.push(["→ Fonds d’urgence" + (reste > 0.5 ? " (+ le surplus des dettes)" : ""), m * 0.2 + Math.max(0, reste)]);
+      lignes.push(["→ Plaisir (toi et ton fils)", m * 0.1]);
+      return { titre: "Ta priorité : les dettes à plus de 15 %, remboursées dans l’ordre sans jamais dépasser leur solde — aucun placement ne bat ce rendement garanti.", lignes };
+    }
     if (fu && fu.solde < revenuMensuel * 3) return { titre: "Dettes chères réglées : consolide ton coussin de sécurité.", lignes: [["60 % → Fonds d’urgence", m * 0.6], ["30 % → CELIAPP (maison 2027)", m * 0.3], ["10 % → plaisir", m * 0.1]] };
     return { titre: "Situation saine : chaque dollar travaille pour la maison 2027.", lignes: [["60 % → CELIAPP", m * 0.6], ["30 % → CELI", m * 0.3], ["10 % → plaisir", m * 0.1]] };
   };
@@ -576,7 +651,7 @@ function KhairaFinances() {
   );
 
   const resteMensuel = revenuMensuel - depensesComptantMois - data.budgetCartes - paiementsHorsBudget
-    - contributionsMensInvest - contributionsEnveloppes - reeeMensuel;
+    - contributionsMensInvest - contributionsEnveloppes - reeeMensuel - tontineMensuel;
 
   /* ----- ZAKAT : nisab, hawl lunaire (354 jours), base et 2,5 % ----- */
   const zk = data.zakat || DEFAUT.zakat;
@@ -596,7 +671,9 @@ function KhairaFinances() {
     + (zk.orGrammes || 0) * (zk.prixOrGramme || 0)
     + (zk.autresActifs || 0);
   const mensualitesDettes = data.budgetCartes + paiementsHorsBudget;
-  const dettesDeduites = zk.deduireDettes === "total" ? detteTotale : zk.deduireDettes === "12mois" ? Math.min(detteTotale, mensualitesDettes * 12) : 0;
+  const obligationTontine = tn.actif !== false ? Math.max(0, -tontineNette) : 0;
+  const dettesDeduites = (zk.deduireDettes === "total" ? detteTotale : zk.deduireDettes === "12mois" ? Math.min(detteTotale, mensualitesDettes * 12) : 0)
+    + (zk.deduireDettes === "aucune" ? 0 : obligationTontine);
   const baseZakat = Math.max(0, actifsZakat - dettesDeduites);
   const zakatAtteinte = baseZakat >= nisab && nisab > 0;
   const montantZakat = zakatAtteinte ? baseZakat * 0.025 : 0;
@@ -673,8 +750,16 @@ function KhairaFinances() {
 
   /* ----- conseils dynamiques ----- */
   const conseils = [];
+  if (soldesPerimes.length)
+    conseils.push({ t: `${soldesPerimes.length} solde(s) à reporter depuis tes relevés`, d: soldesPerimes.map((d) => `${d.nom} (relevé du ${dernierReleveIso(d.jourReleve).slice(8)}/${dernierReleveIso(d.jourReleve).slice(5, 7)})`).join(" · ") + ". Tant que ces soldes datent d’avant le relevé, le plan, les minimums et l’analyse travaillent sur d’anciens chiffres.", c: C.clay });
   if (paiesCeMois >= 3)
     conseils.push({ t: "Mois à 3 paies 🎉", d: `Ce mois-ci compte ${paiesCeMois} vendredis de paie — une paie « bonus » de ${fmt(data.profil.paieNette)} que ton budget mensuel n’attend pas. Envoie-la sur la dette au taux le plus élevé : c’est l’accélérateur le plus puissant de l’année, deux fois par an.`, c: C.emerald });
+  if (tn.actif !== false && tontineRetards.length > 0)
+    conseils.push({ t: `Tontine : ${tontineRetards.length} dimanche(s) à confirmer`, d: `${fmt(tontineRetards.reduce((s, x) => s + x.montant, 0))} de cotisations passées ne sont pas cochées. Si tu les as versées, un clic dans l’onglet Tontine (« Marquer les dimanches passés ») remet tout à jour.`, c: C.brass });
+  if (tn.actif !== false && tontineProchainRecu) {
+    const jr = Math.round((new Date(tontineProchainRecu.date + "T00:00:00") - new Date(auj + "T00:00:00")) / 86400000);
+    if (jr <= 60) conseils.push({ t: `Main de tontine dans ${jr} jours : ${fmt(tontineProchainRecu.montant)}`, d: `Décide maintenant où va chaque dollar — l’onglet Tontine te propose une répartition selon ta situation du jour. Un montant décidé d’avance ne se dilue pas.`, c: C.emerald });
+  }
   if (totalDepotsEnAttente > 0)
     conseils.push({ t: `${fmt(totalDepotsEnAttente)} de dépôts planifiés à appliquer`, d: `Depuis ta dernière mise à jour, ${depotsEnAttente.map((i) => `${i.nom} (${i.n}×)`).join(", ")} devaient recevoir leurs versements. Un clic dans l’onglet Investissements et tes soldes rattrapent la réalité.`, c: C.brass });
   const fondsUrgence = data.enveloppes.find((e) => e.nom.toLowerCase().includes("urgence"));
@@ -706,6 +791,26 @@ function KhairaFinances() {
 
   /* ----- helpers listes ----- */
   const majDette = (id, patch) => maj({ dettes: data.dettes.map((d) => (d.id === id ? { ...d, ...patch } : d)) });
+
+  /* ----- Synchronisation des dettes : quel que soit le chemin (saisie, bouton, Agenda, dépense),
+     un solde qui change met à jour la date de fraîcheur et recalcule le minimum auto ----- */
+  const soldesPrec = React.useRef(null);
+  useEffect(() => {
+    if (!loaded) return;
+    const ajd = isoLocal();
+    const prec = soldesPrec.current;
+    const patches = {};
+    data.dettes.forEach((d) => {
+      const p = {};
+      if (prec && prec[d.id] !== undefined && Math.abs(prec[d.id] - (d.solde || 0)) > 0.004 && d.majLe !== ajd) p.majLe = ajd;
+      const auto = d.minAuto ?? estCarteCredit(d);
+      if (d.minAuto === undefined) p.minAuto = auto;
+      if (auto) { const m = minQuebec(d.solde || 0); if (m !== d.minimum) p.minimum = m; }
+      if (Object.keys(p).length) patches[d.id] = p;
+    });
+    soldesPrec.current = Object.fromEntries(data.dettes.map((d) => [d.id, d.solde || 0]));
+    if (Object.keys(patches).length) setData((dd) => ({ ...dd, dettes: dd.dettes.map((d) => (patches[d.id] ? { ...d, ...patches[d.id] } : d)) }));
+  }, [loaded, data.dettes]);
   const majInvest = (id, patch) => maj({ investissements: data.investissements.map((a) => (a.id === id ? { ...a, ...patch } : a)) });
   const majEnv = (id, patch) => maj({ enveloppes: data.enveloppes.map((e) => (e.id === id ? { ...e, ...patch } : e)) });
 
@@ -818,6 +923,12 @@ function KhairaFinances() {
             push(`Payer ${dt.nom} — avant l’échéance du ${dt.jourEcheance}`, -plan, "carte", dt.id);
         }
       });
+      // Tontine : cotisation chaque dimanche, main reçue aux dates prévues
+      if (tn.actif !== false) {
+        const t = tontineCal.find((x) => x.iso === iso);
+        if (t) push(`🤝 Cotisation tontine — cycle ${t.cycle}${t.cloture ? " (clôture)" : ""}`, -t.montant, "tontine");
+        (tn.recus || []).filter((r) => r.date === iso).forEach((r) => push(`🤝 Main de tontine reçue — ${r.note || ""}`, r.montant, "tontine-recu"));
+      }
       // 1er décembre : fenêtre REER de fin d'année
       if (jour === 1 && d.getMonth() === 11)
         push(`🎁 Maximiser ton REER — ${fmt(Math.max(0, (data.fiscal?.droitsReer || 0) - (data.fiscal?.cotiseReer || 0)))} de droits restants (limite : 60 premiers jours de l’an prochain)`, null, "invest");
@@ -835,7 +946,7 @@ function KhairaFinances() {
       if ((jour === 2 || jour === 16) && data.fils.reee.contribution > 0) push("Versement REEE de mon fils", -data.fils.reee.contribution, "invest");
     }
     return evts;
-  }, [data.profil.prochainePaie, data.profil.paieNette, data.dettes, data.investissements, data.fils, sim, contributionsEnveloppes]);
+  }, [data.profil.prochainePaie, data.profil.paieNette, data.dettes, data.investissements, data.fils, sim, contributionsEnveloppes, tontineCal, data.tontine]);
 
   const toggleFait = (e) => {
     const dejaFait = !!(data.faits || {})[e.cle];
@@ -905,6 +1016,15 @@ function KhairaFinances() {
         }
       }
     }
+    // Cocher une cotisation de tontine → marquée versée dans l'onglet Tontine
+    if (e.type === "tontine") {
+      setData((d) => ({
+        ...d,
+        faits: { ...(d.faits || {}), [e.cle]: !dejaFait },
+        tontine: { ...(d.tontine || {}), versements: { ...((d.tontine || {}).versements || {}), [e.iso]: !dejaFait } },
+      }));
+      return;
+    }
     // Cocher une entrée de mon fils (pension, allocations) → créditer son compte Desjardins
     if (!dejaFait && e.type === "fils" && e.montant > 0) {
       if (window.confirm(`Ajouter ${fmt(e.montant)} au compte Desjardins de ton fils ?`)) {
@@ -921,6 +1041,13 @@ function KhairaFinances() {
 
   /* ----- L'analyse de Fab : conseiller IA intégré (Claude dans Claude) ----- */
   const [analyseEnCours, setAnalyseEnCours] = useState(false);
+  const [erreurAnalyse, setErreurAnalyse] = useState("");
+  const empreinteChiffres = JSON.stringify([
+    data.dettes.map((d) => Math.round(d.solde || 0)), data.budgetCartes, data.profil.paieNette,
+    data.investissements.map((a) => Math.round(a.solde || 0)), Math.round(enveloppesTotal), tontineVerse,
+  ]);
+  const analyseAJour = !!data.analyse?.date && data.analyse.date === isoLocal() && data.analyse.empreinte === empreinteChiffres;
+  const iaDispo = !!data.profil.cleApi || !window.__KHAIRA_WEB__;
   const enTetesAPI = () => {
     const h = { "Content-Type": "application/json" };
     if (data.profil.cleApi) {
@@ -954,27 +1081,51 @@ function KhairaFinances() {
         enveloppes: data.enveloppes.map((e) => ({ nom: e.nom, solde: e.solde, objectif: e.objectif, parMois: e.mensuel })),
         resteTheoriqueParMois: Math.round(resteMensuel),
         cotesDeCredit: (data.scores || []).slice(-6),
+        planDeCeMois: data.dettes.filter((d) => sim.planMois1?.[d.id]).map((d) => ({ dette: d.nom, montant: Math.round(sim.planMois1[d.id]), minimum: d.minimum })),
+        datesCartes: data.dettes.filter((d) => d.dansBudget && d.solde > 0).map((d) => ({ carte: d.nom, prochainReleve: d.jourReleve ? isoLocal(prochaineOccurrence(d.jourReleve)) : null, prochaineEcheance: d.jourEcheance ? isoLocal(prochaineOccurrence(d.jourEcheance)) : null, soldeMisAJourLe: d.majLe || "inconnu" })),
+        soldesPerimes: soldesPerimes.map((d) => d.nom),
+        tontine: tn.actif !== false ? { coutMensuel: Math.round(tontineMensuel), dejaVerse: tontineVerse, resteAVerser: tontineResteAVerser, prochaineMain: tontineProchainRecu || null } : null,
+        resteParPaie: Math.round(resteMensuel * 12 / 26),
       };
-      const rep = await fetch("https://api.anthropic.com/v1/messages", {
+      const ajd = new Date();
+      const dateLongue = ajd.toLocaleDateString("fr-CA", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+      const consigne = `Nous sommes aujourd’hui le ${dateLongue} (${isoLocal(ajd)}). Toute date que tu cites doit être aujourd’hui ou plus tard, avec le bon jour de la semaine, et tirée des dates fournies (relevés, échéances, tontine) quand c’est possible. Si certains soldes sont signalés comme périmés, dis-le en premier.`;
+      let dataR = null;
+      for (const modele of ["claude-sonnet-4-6", "claude-sonnet-5-5"]) {
+        const rep = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: enTetesAPI(),
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
+          model: modele,
           max_tokens: 2000,
           messages: [{
             role: "user",
-            content: `Tu es Fab, conseiller en finances personnelles au Québec : chaleureux, direct, précis, aucune flatterie. Voici la situation financière réelle de Kadi en JSON : ${JSON.stringify(resume)}. Ses objectifs : libérée de ses dettes en ${data.objectifMois} mois maximum, toutes les cartes sous ${data.seuilUtil} % d'utilisation, cote de crédit en hausse, achat d'une maison en 2027 (CELIAPP + REER/RAP), discipline d'épargne aux 2 semaines. Rédige en français, au tutoiement, une analyse de 300 mots maximum avec exactement ces 4 sections en majuscules : ÉTAT GLOBAL — LE RISQUE À SURVEILLER — L'ACTION DE LA SEMAINE — CAP SUR 2027. Utilise ses vrais chiffres. Une seule action concrète et datée dans la section action. Termine par une phrase courte et digne, sans emphase excessive.`,
+            content: `Tu es Fab, conseiller en finances personnelles au Québec : chaleureux, direct, précis, aucune flatterie. ${consigne} Voici la situation financière réelle de Kadi en JSON : ${JSON.stringify(resume)}. Ses objectifs : libérée de ses dettes en ${data.objectifMois} mois maximum, toutes les cartes sous ${data.seuilUtil} % d'utilisation, cote de crédit en hausse, achat d'une maison en 2027 (CELIAPP + REER/RAP), discipline d'épargne aux 2 semaines. Rédige en français, au tutoiement, une analyse de 300 mots maximum avec exactement ces 4 sections en majuscules : ÉTAT GLOBAL — LE RISQUE À SURVEILLER — L'ACTION DE LA SEMAINE — CAP SUR 2027. Utilise ses vrais chiffres. Une seule action concrète et datée dans la section action. Termine par une phrase courte et digne, sans emphase excessive.`,
           }],
         }),
       });
-      const dataR = await rep.json();
-      const texte = (dataR.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
-      maj({ analyse: { texte: texte || "L’analyse n’a pas pu être générée — réessaie dans un instant.", date: new Date().toLocaleDateString("fr-CA") } });
+        dataR = await rep.json().catch(() => null);
+        if (rep.ok && dataR && dataR.content) break;
+      }
+      const texte = ((dataR && dataR.content) || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+      if (!texte) throw new Error((dataR && dataR.error && dataR.error.message) || "réponse vide");
+      // Une analyse réussie remplace l'ancienne ; un échec ne l'efface jamais
+      maj({ analyse: { texte, date: isoLocal(ajd), horodatage: ajd.toISOString(), empreinte: empreinteChiffres, detteTotale: Math.round(detteTotale) } });
+      setErreurAnalyse("");
     } catch (e) {
-      maj({ analyse: { texte: "L’analyse n’a pas pu être générée — vérifie ta connexion et réessaie.", date: new Date().toLocaleDateString("fr-CA") } });
+      setErreurAnalyse("L’analyse n’a pas pu être générée (" + (e.message || "connexion") + "). L’analyse précédente est conservée.");
     }
     setAnalyseEnCours(false);
   };
+
+  const derniereAuto = React.useRef(0);
+  useEffect(() => {
+    // Analyse périmée (autre jour ou chiffres modifiés) → nouvelle lecture 20 s après la dernière modification, au plus une par minute
+    if (!loaded || !iaDispo || analyseAJour || analyseEnCours) return;
+    const delai = Math.max(20000, 60000 - (Date.now() - derniereAuto.current));
+    const t = setTimeout(() => { derniereAuto.current = Date.now(); demanderAnalyse(); }, delai);
+    return () => clearTimeout(t);
+  }, [loaded, data, analyseAJour, analyseEnCours]);
 
   /* ----- RELEVÉS : import CSV, analyse IA, rapprochement ----- */
   const [rl, setRl] = useState({ texte: "", lignes: [], enCours: false, categorie: "Autre", detteId: "" });
@@ -1155,6 +1306,7 @@ function KhairaFinances() {
     ["invest", "Investissements"],
     ["paie", "Paie & impôts"],
     ["zakat", "Zakat ☪"],
+    ["tontine", "Tontine 🤝"],
     ["fils", "Mon fils"],
     ["env", "Enveloppes"],
   ];
@@ -1241,13 +1393,22 @@ function KhairaFinances() {
                 "Sauvegarde Coffre-fort copiée dans une note",
               ];
               const cles = items.map((it) => `cloture-${mk}|${it}`);
-              const faitsN = cles.filter((c) => (data.faits || {})[c]).length;
+              const cartesSuivies = data.dettes.filter((d) => d.dansBudget && d.solde > 0);
+              const auto = [
+                cartesSuivies.length > 0 && soldesPerimes.length === 0 && cartesSuivies.every((d) => d.majLe),
+                false,
+                (data.scores || []).some((x) => x.mois === mk),
+                !!data.analyse?.date && data.analyse.date.startsWith(mk),
+                false,
+              ];
+              const coche = (i) => !!(data.faits || {})[cles[i]] || auto[i];
+              const faitsN = cles.filter((c, i) => coche(i)).length;
               return (
                 <Carte sur="Rituel de clôture" titre={`Fermer le mois proprement — ${faitsN}/${items.length}`} accent={faitsN === items.length ? C.emerald : C.brass}>
                   {items.map((it, i) => (
-                    <div key={it} className="kh-ag-evt" style={{ gridTemplateColumns: "22px 1fr", opacity: (data.faits || {})[cles[i]] ? 0.5 : 1 }}>
-                      <input type="checkbox" checked={!!(data.faits || {})[cles[i]]} onChange={() => maj({ faits: { ...(data.faits || {}), [cles[i]]: !(data.faits || {})[cles[i]] } })} />
-                      <span style={{ textDecoration: (data.faits || {})[cles[i]] ? "line-through" : "none" }}>{it}</span>
+                    <div key={it} className="kh-ag-evt" style={{ gridTemplateColumns: "22px 1fr", opacity: coche(i) ? 0.5 : 1 }}>
+                      <input type="checkbox" checked={coche(i)} disabled={auto[i]} onChange={() => maj({ faits: { ...(data.faits || {}), [cles[i]]: !(data.faits || {})[cles[i]] } })} />
+                      <span style={{ textDecoration: coche(i) ? "line-through" : "none" }}>{it}{auto[i] ? " — constaté ✓" : ""}</span>
                     </div>
                   ))}
                   <p className="kh-min" style={{ marginTop: 8 }}>{faitsN === items.length ? "Mois fermé avec rigueur — tes chiffres et la réalité sont parfaitement alignés. ✓" : "10 minutes, relevés en main, en fin de mois — c’est ce rituel qui rend tous les calculs vrais."}</p>
@@ -1256,12 +1417,26 @@ function KhairaFinances() {
             })()}
 
             <Carte sur="Ton conseiller intégré" titre="L’analyse de Fab — sur tes vrais chiffres" accent={C.brass}>
+              {data.analyse?.date && (
+                <div className="kh-eyebrow" style={{ color: analyseAJour ? C.emerald : C.clay, marginBottom: 8 }}>
+                  {analyseAJour ? "✓ " : "⚠ "}Analyse du {data.analyse.horodatage
+                    ? new Date(data.analyse.horodatage).toLocaleString("fr-CA", { weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })
+                    : fmtIso(data.analyse.date)}
+                </div>
+              )}
+              {data.analyse?.date && !analyseAJour && (
+                <p className="kh-min" style={{ color: C.clay, marginTop: 0 }}>
+                  Tes chiffres ont changé depuis cette analyse{data.analyse.detteTotale != null ? ` (dette : ${fmt(data.analyse.detteTotale)} → ${fmt(detteTotale)})` : ""}.
+                  {iaDispo ? " Une nouvelle lecture se lance automatiquement 20 secondes après ta dernière modification — ou clique « Nouvelle analyse »." : " Clique « Nouvelle analyse » (ajoute ta clé API dans Paie & impôts pour l’actualisation automatique)."}
+                </p>
+              )}
+              {erreurAnalyse && <p className="kh-min" style={{ color: C.clay, marginTop: 0 }}>{erreurAnalyse}</p>}
               {data.analyse?.texte && <div className="kh-analyse">{data.analyse.texte}</div>}
               <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: data.analyse ? 12 : 0 }}>
                 <button className="kh-btn kh-btn-plein" disabled={analyseEnCours} onClick={demanderAnalyse}>
                   {analyseEnCours ? "Fab lit tes chiffres…" : data.analyse ? "🔮 Nouvelle analyse" : "🔮 Demander mon analyse personnalisée"}
                 </button>
-                {data.analyse?.date && <span className="kh-min">Dernière analyse : {data.analyse.date}</span>}
+
               </div>
               {!data.analyse && <p className="kh-min" style={{ marginTop: 10 }}>Un clic, et une intelligence lit ta dette, ton utilisation de crédit, tes dépenses, tes enveloppes et ta trajectoire 2027 — puis te remet un diagnostic et l’action de la semaine. À refaire chaque mois après ta mise à jour des soldes.</p>}
             </Carte>
@@ -1289,13 +1464,14 @@ function KhairaFinances() {
                     ["Placements à chaque paie (CELIAPP, CELI…)", data.investissements.filter((a) => a.freq === "paie").reduce((s, a) => s + a.contribution, 0)],
                     ["REEE de mon fils", (reeeMensuel * 12) / 26],
                     ["Enveloppes", (contributionsEnveloppes * 12) / 26],
+                    ["Tontine", (tontineMensuel * 12) / 26],
                   ].map(([l, v], i) => (
                     <div key={i} className="kh-flux-ligne"><span>{l}</span><b style={{ color: C.clay }}>− {fmt(v)}</b></div>
                   ))}
                   <div className="kh-flux-ligne kh-flux-total">
                     <span>Reste par paie pour la vie courante</span>
-                    <b style={{ color: (data.profil.paieNette - (data.budgetCartes * 12) / 26 - (paiementsHorsBudget * 12) / 26 - data.investissements.filter((a) => a.freq === "paie").reduce((s, a) => s + a.contribution, 0) - (reeeMensuel * 12) / 26 - (contributionsEnveloppes * 12) / 26) >= 0 ? C.emerald : C.clay }}>
-                      {fmt(data.profil.paieNette - (data.budgetCartes * 12) / 26 - (paiementsHorsBudget * 12) / 26 - data.investissements.filter((a) => a.freq === "paie").reduce((s, a) => s + a.contribution, 0) - (reeeMensuel * 12) / 26 - (contributionsEnveloppes * 12) / 26)}
+                    <b style={{ color: (data.profil.paieNette - (data.budgetCartes * 12) / 26 - (paiementsHorsBudget * 12) / 26 - data.investissements.filter((a) => a.freq === "paie").reduce((s, a) => s + a.contribution, 0) - (reeeMensuel * 12) / 26 - (contributionsEnveloppes * 12) / 26 - (tontineMensuel * 12) / 26) >= 0 ? C.emerald : C.clay }}>
+                      {fmt(data.profil.paieNette - (data.budgetCartes * 12) / 26 - (paiementsHorsBudget * 12) / 26 - data.investissements.filter((a) => a.freq === "paie").reduce((s, a) => s + a.contribution, 0) - (reeeMensuel * 12) / 26 - (contributionsEnveloppes * 12) / 26 - (tontineMensuel * 12) / 26)}
                     </b>
                   </div>
                 </div>
@@ -1346,11 +1522,12 @@ function KhairaFinances() {
                   ["Placements (REER, CELIAPP, CELI)", -contributionsMensInvest, C.brass],
                   ["REEE de mon fils", -reeeMensuel, C.brass],
                   ["Enveloppes (urgence, auto, maman…)", -contributionsEnveloppes, C.brass],
+                  ["Tontine (cotisations des dimanches)", -tontineMensuel, C.brass],
                   ["Dépenses du mois payées comptant / débit", -depensesComptantMois, C.soft],
                 ].map(([l, v, c], i) => (
                   <div key={i} className="kh-flux-ligne">
                     <span>{l}</span>
-                    <b style={{ color: c }}>{v >= 0 ? "+" : "−"} {fmt(Math.abs(v))}</b>
+                    <b style={{ color: c }}>{i === 0 ? "+" : "−"} {fmt(Math.abs(v))}</b>
                   </div>
                 ))}
                 <div className="kh-flux-ligne kh-flux-total">
@@ -1387,7 +1564,7 @@ function KhairaFinances() {
                   try {
                     const p = JSON.parse(dump);
                     if (!p || !p.dettes) throw new Error();
-                    if (window.confirm("Remplacer toutes les données actuelles par cette sauvegarde ?")) setData({ ...DEFAUT, ...p });
+                    if (window.confirm("Remplacer toutes les données actuelles par cette sauvegarde ?")) { soldesPrec.current = null; setData({ ...DEFAUT, ...p }); }
                   } catch (e) { alert("Ce texte n’est pas une sauvegarde valide."); }
                 }}>Restaurer depuis le texte</button>
               </div>
@@ -1431,7 +1608,7 @@ function KhairaFinances() {
                     <div key={e.cle} className="kh-ag-evt" style={{ opacity: (data.faits || {})[e.cle] ? 0.45 : 1 }}>
                       <input type="checkbox" checked={!!(data.faits || {})[e.cle]} onChange={() => toggleFait(e)} />
                       <span className="kh-cat-chip" style={{ margin: 0, background: e.type === "carte" || e.type === "echeance" ? C.claySoft : e.type === "paie" || e.type === "fils" ? C.emeraldSoft : C.brassSoft, color: e.type === "carte" || e.type === "echeance" ? C.clay : e.type === "paie" || e.type === "fils" ? C.emerald : C.brass }}>
-                        {e.type === "carte" ? "carte" : e.type === "echeance" ? "échéance" : e.type === "paie" ? "paie" : e.type === "fils" ? "fils" : e.type === "enveloppe" ? "enveloppe" : e.type === "dette" ? "dette" : "placement"}
+                        {e.type === "carte" ? "carte" : e.type === "echeance" ? "échéance" : e.type === "paie" ? "paie" : e.type === "fils" ? "fils" : e.type === "enveloppe" ? "enveloppe" : e.type === "dette" ? "dette" : e.type === "tontine" || e.type === "tontine-recu" ? "tontine" : "placement"}
                       </span>
                       <span className="kh-tx-nom" style={{ textDecoration: (data.faits || {})[e.cle] ? "line-through" : "none" }}>{e.titre}</span>
                       <b style={{ color: (e.montant || 0) >= 0 ? C.emerald : C.clay }}>{e.montant != null ? `${e.montant >= 0 ? "+" : "−"} ${fmt(Math.abs(e.montant))}` : ""}</b>
@@ -1529,6 +1706,16 @@ function KhairaFinances() {
                         <button className="kh-suppr" onClick={() => maj({ dettes: data.dettes.filter((x) => x.id !== d.id) })}>✕</button>
                       </div>
                       <div className="kh-env-solde" style={{ color: d.solde > 0 ? C.night : C.emerald }}>{fmt(d.solde)}{d.solde <= 0 && " · Payée ✓"}</div>
+                      {d.dansBudget && d.solde > 0 && (() => {
+                        const dr = dernierReleveIso(d.jourReleve);
+                        const perime = dr && (!d.majLe || d.majLe < dr);
+                        return (
+                          <div className="kh-min" style={{ color: perime ? C.clay : C.soft, fontWeight: perime ? 700 : 400 }}>
+                            {d.majLe ? `Solde mis à jour le ${fmtIso(d.majLe)}` : "Date de mise à jour inconnue"}
+                            {perime ? ` · ⚠ relevé du ${fmtIso(dr)} à reporter` : d.majLe ? " ✓" : ""}
+                          </div>
+                        );
+                      })()}
                       {util !== null && (
                         <>
                           <Jauge pct={util} couleur={util > data.seuilUtil ? C.clay : C.emerald} />
@@ -1542,7 +1729,9 @@ function KhairaFinances() {
                         {d.dansBudget && <Champ label="Limite" value={d.limite || 0} onChange={(v) => majDette(d.id, { limite: v })} suffix="$" />}
                         <Champ label="Taux" value={d.taux} onChange={(v) => majDette(d.id, { taux: v })} w={64} suffix="%" />
                         {d.dansBudget
-                          ? <Champ label="Minimum / mois" value={d.minimum || 0} onChange={(v) => majDette(d.id, { minimum: v })} w={90} suffix="$" />
+                          ? (d.minAuto
+                            ? <label className="kh-champ"><span className="kh-champ-label">Minimum (auto 5 %)</span><span className="kh-champ-wrap"><input type="number" value={d.minimum || 0} disabled style={{ width: 90, background: C.paper }} /><em>$</em></span></label>
+                            : <Champ label="Minimum / mois" value={d.minimum || 0} onChange={(v) => majDette(d.id, { minimum: v })} w={90} suffix="$" />)
                           : <Champ label="Paiement fixe / mois" value={d.paiement || 0} onChange={(v) => majDette(d.id, { paiement: v })} w={90} suffix="$" />}
                         {d.dansBudget && <Champ label="Jour de relevé" value={d.jourReleve || 0} onChange={(v) => majDette(d.id, { jourReleve: Math.min(31, Math.max(0, Math.round(v))) })} w={64} suffix="du mois" />}
                         {d.dansBudget && <Champ label="Jour d’échéance" value={d.jourEcheance || 0} onChange={(v) => majDette(d.id, { jourEcheance: Math.min(31, Math.max(0, Math.round(v))) })} w={64} suffix="du mois" />}
@@ -1568,13 +1757,14 @@ function KhairaFinances() {
                         <button className="kh-btn kh-btn-mini" onClick={() => logMouvement(d, "paiement")}>− Paiement passé</button>
                         <button className="kh-btn kh-btn-mini" style={{ background: C.claySoft, color: C.clay, borderColor: "#B0452F33" }} onClick={() => logMouvement(d, "achat")}>+ Achat sur la carte</button>
                         <label className="kh-toggle"><input type="checkbox" checked={!!d.dansBudget} onChange={(e) => majDette(d.id, { dansBudget: e.target.checked })} /> dans le budget cartes</label>
+                        {d.dansBudget && <label className="kh-toggle" title="Décoche pour inscrire le minimum exact de ton relevé"><input type="checkbox" checked={!!d.minAuto} onChange={(e) => majDette(d.id, { minAuto: e.target.checked })} /> minimum auto (5 % du solde, règle Québec)</label>}
                       </div>
                     </div>
                   );
                 })}
               </div>
               <div className="kh-actions">
-                <button className="kh-btn" onClick={() => maj({ dettes: [...data.dettes, { id: uid(), nom: "Nouvelle dette", solde: 0, limite: 0, taux: 19.99, minimum: 25, dansBudget: true }] })}>+ Ajouter une dette</button>
+                <button className="kh-btn" onClick={() => maj({ dettes: [...data.dettes, { id: uid(), nom: "Nouvelle dette", solde: 0, limite: 0, taux: 19.99, minimum: 0, dansBudget: true, minAuto: true, majLe: isoLocal() }] })}>+ Ajouter une dette</button>
                 <Champ label="Dette de départ (référence)" value={data.detteInitiale} onChange={(v) => maj({ detteInitiale: v })} suffix="$" />
               </div>
             </Carte>
@@ -1720,6 +1910,82 @@ function KhairaFinances() {
         )}
 
         {/* ============================================================ ZAKAT */}
+        {tab === "tontine" && (
+          <>
+            <div className="kh-grille-4">
+              <Carte sur="Versé"><div className="kh-big">{fmt(tontineVerse)}</div><Jauge pct={(tontineVerse / (tontinePrevu || 1)) * 100} /><div className="kh-min">sur {fmt(tontinePrevu)} prévus · reste {fmt(tontineResteAVerser)}</div></Carte>
+              <Carte sur="Reçu"><div className="kh-big" style={{ color: C.emerald }}>{fmt(tontineRecu)}</div><div className="kh-min">{tontineProchainRecu ? `prochaine main : ${fmt(tontineProchainRecu.montant)} le ${fmtIso(tontineProchainRecu.date)}` : "toutes tes mains sont encaissées"}</div></Carte>
+              <Carte sur="Position nette"><div className="kh-big" style={{ color: tontineNette >= 0 ? C.emerald : C.clay }}>{tontineNette >= 0 ? "+" : "−"} {fmt(Math.abs(tontineNette))}</div><div className="kh-min">{tontineNette < 0 ? "ce que tu dois encore verser au groupe au-delà de ce qu’il te remettra — un prêt sans intérêt, mais un engagement" : "ce que la tontine te remettra encore au-delà de tes cotisations"}</div></Carte>
+              <Carte sur="Prochaine cotisation"><div className="kh-big" style={{ color: C.brass }}>{tontineProchaine ? fmt(tontineProchaine.montant) : "—"}</div><div className="kh-min">{tontineProchaine ? `${JOURS_SEM[tontineProchaine.d.getDay()]} ${fmtJour(tontineProchaine.d)} · cycle ${tontineProchaine.cycle}${tontineProchaine.cloture ? " (clôture)" : ""}` : "cycle terminé"} · ≈ {fmt(tontineMensuel)}/mois</div></Carte>
+            </div>
+
+            <Carte sur="Calendrier" titre={`${tn.nom || "Tontine"} — ${tontineCal.length} dimanches`}>
+              <p className="kh-min" style={{ marginBottom: 10 }}>Touche un dimanche pour le marquer versé (vert). Rouge = passé et non coché. Doré = jour où tu reçois une main. Cocher la cotisation dans l’Agenda fait la même chose.</p>
+              <div className="kh-tn-grille">
+                {tontineCal.map((x) => {
+                  const paye = !!(tn.versements || {})[x.iso];
+                  const retard = !paye && x.iso < auj;
+                  const recu = (tn.recus || []).find((r) => r.date === x.iso);
+                  return (
+                    <button key={x.iso} className="kh-tn-jour" title={`${x.iso} · ${fmt(x.montant)}`}
+                      style={{ background: paye ? C.emeraldSoft : retard ? C.claySoft : "#fff", borderColor: recu ? C.brass : paye ? C.emerald : retard ? C.clay : C.line, boxShadow: recu ? `0 0 0 2px ${C.brass}` : "none" }}
+                      onClick={() => majTontine({ versements: { ...(tn.versements || {}), [x.iso]: !paye } })}>
+                      <span style={{ fontSize: 10.5, color: C.soft }}>C{x.cycle}{x.cloture ? " ✦" : ""}</span>
+                      <b style={{ fontSize: 12.5 }}>{x.d.getDate()} {NOMS_MOIS[x.d.getMonth()]}</b>
+                      <span style={{ fontSize: 11.5, color: paye ? C.emerald : retard ? C.clay : C.ink }}>{fmt(x.montant)}{paye ? " ✓" : ""}</span>
+                      {recu && <span style={{ fontSize: 10.5, color: C.brass, fontWeight: 700 }}>+{fmt(recu.montant)}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="kh-env-actions" style={{ marginTop: 12 }}>
+                <button className="kh-btn kh-btn-mini" onClick={() => { const v = { ...(tn.versements || {}) }; tontineCal.filter((x) => x.iso <= auj).forEach((x) => { v[x.iso] = true; }); majTontine({ versements: v }); }}>✓ Marquer tous les dimanches passés comme versés</button>
+              </div>
+            </Carte>
+
+            <div className="kh-grille-2">
+              <Carte sur="Stratégie" titre="Que faire de ta prochaine main ?" accent={C.emerald}>
+                {tontineProchainRecu ? (() => {
+                  const g = guideRetour(tontineProchainRecu.montant);
+                  return g ? (
+                    <>
+                      <p className="kh-min" style={{ marginTop: 0 }}>{fmt(tontineProchainRecu.montant)} le {fmtIso(tontineProchainRecu.date)} — selon ta situation d’aujourd’hui : {g.titre}</p>
+                      <div className="kh-flux">{g.lignes.map(([l, v], i) => <div key={i} className="kh-flux-ligne"><span>{l}</span><b style={{ color: C.emerald }}>{fmt(v)}</b></div>)}</div>
+                      <p className="kh-min" style={{ marginTop: 8 }}>Rappel : jusqu’en juin, tes cotisations continuent ({fmt(tontineResteAVerser)} restants). Garde-les dans le budget avant tout autre extra.</p>
+                    </>
+                  ) : null;
+                })() : <p className="kh-vide">Toutes tes mains sont encaissées — il ne reste que tes cotisations à honorer.</p>}
+              </Carte>
+
+              <Carte sur="Paramètres" titre="Ta tontine, modifiable">
+                <div className="kh-colonne">
+                  <Champ type="text" label="Nom" value={tn.nom || ""} onChange={(v) => majTontine({ nom: v })} w={200} />
+                  <label className="kh-champ"><span className="kh-champ-label">Premier dimanche de cotisation</span>
+                    <input type="date" value={tn.debut || ""} onChange={(e) => majTontine({ debut: e.target.value })} />
+                  </label>
+                  <div className="kh-saisie" style={{ marginBottom: 0 }}>
+                    <Champ label="Cotisation du dimanche" value={tn.cotisation} onChange={(v) => majTontine({ cotisation: v })} w={80} suffix="$" />
+                    <Champ label="Dimanche de clôture" value={tn.cotisationCloture} onChange={(v) => majTontine({ cotisationCloture: v })} w={80} suffix="$" />
+                    <Champ label="Nombre de cycles" value={tn.nbCycles} onChange={(v) => majTontine({ nbCycles: Math.max(0, Math.round(v)) })} w={60} />
+                  </div>
+                  <label className="kh-toggle"><input type="checkbox" checked={tn.actif !== false} onChange={(e) => majTontine({ actif: e.target.checked })} /> Tontine active (comptée dans le flux, la valeur nette et l’agenda)</label>
+                </div>
+                <div className="kh-eyebrow" style={{ marginTop: 14, marginBottom: 6 }}>Mains reçues / à recevoir</div>
+                {(tn.recus || []).map((r) => (
+                  <div key={r.id} className="kh-saisie" style={{ marginBottom: 6 }}>
+                    <input type="date" value={r.date} onChange={(e) => majTontine({ recus: tn.recus.map((x) => (x.id === r.id ? { ...x, date: e.target.value } : x)) })} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "7px 9px", fontFamily: "inherit" }} />
+                    <Champ value={r.montant} onChange={(v) => majTontine({ recus: tn.recus.map((x) => (x.id === r.id ? { ...x, montant: v } : x)) })} w={90} suffix="$" />
+                    <Champ type="text" value={r.note || ""} onChange={(v) => majTontine({ recus: tn.recus.map((x) => (x.id === r.id ? { ...x, note: v } : x)) })} w={120} />
+                    <button className="kh-suppr" onClick={() => majTontine({ recus: tn.recus.filter((x) => x.id !== r.id) })}>✕</button>
+                  </div>
+                ))}
+                <button className="kh-btn kh-btn-mini" onClick={() => majTontine({ recus: [...(tn.recus || []), { id: uid(), date: auj, montant: 0, note: "" }] })}>+ Ajouter une main</button>
+                <p className="kh-min" style={{ marginTop: 10 }}>Vérification : {fmt(tontinePrevu)} versés au total pour {fmt((tn.recus || []).reduce((s, r) => s + (r.montant || 0), 0))} reçus {tontinePrevu === (tn.recus || []).reduce((s, r) => s + (r.montant || 0), 0) ? "— équilibre parfait ✓" : "— les deux devraient être égaux dans une tontine : vérifie les montants"}.</p>
+              </Carte>
+            </div>
+          </>
+        )}
+
         {tab === "zakat" && (
           <>
             <Carte sur="Troisième pilier" titre="Ta Zakat — calculée avec rigueur" accent={C.brass}>
@@ -2393,6 +2659,9 @@ const CSS = `
 .kh-ag-evt input { accent-color: ${C.emerald}; width: 17px; height: 17px; cursor: pointer; }
 .kh-ag-evt b { text-align: right; }
 .kh-ag-date { font-size: 12px; color: ${C.soft}; font-weight: 700; white-space: nowrap; }
+.kh-tn-grille { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.kh-tn-jour { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1.5px solid; border-radius: 10px; padding: 8px 10px; cursor: pointer; font-family: inherit; text-align: left; }
+.kh-tn-jour:focus-visible { outline: 2px solid ${C.brass}; outline-offset: 2px; }
 .kh-strategique { background: ${C.emeraldSoft}; border: 1px solid ${C.emerald}22; border-radius: 10px; padding: 9px 12px; font-size: 12.5px; color: ${C.night}; margin: 8px 0; line-height: 1.5; }
 .kh-analyse { white-space: pre-wrap; background: ${C.paper}; border: 1px solid ${C.line}; border-left: 4px solid ${C.brass}; border-radius: 0 10px 10px 0; padding: 14px 16px; font-size: 14px; line-height: 1.65; color: ${C.ink}; }
 .kh-textarea { width: 100%; border: 1px solid ${C.line}; border-radius: 10px; padding: 10px 12px; font-family: 'Plus Jakarta Sans', monospace; font-size: 13px; background: #fff; color: ${C.ink}; resize: vertical; }
@@ -2481,7 +2750,7 @@ function CloudGate() {
   const [client, setClient] = useState(null);
   const [session, setSession] = useState(undefined);
   const [mode, setMode] = useState(cfg ? "chargement" : "config");
-  const [u, setU] = useState(""); const [ky, setKy] = useState("");
+  const [u, setU] = useState("https://dgkjhnrczqlcadaodukz.supabase.co"); const [ky, setKy] = useState("");
   const [email, setEmail] = useState(""); const [msg, setMsg] = useState("");
 
   useEffect(() => {
@@ -2502,8 +2771,11 @@ function CloudGate() {
   }, [client, session]);
 
   const sauverCfg = () => {
-    if (!u.trim().startsWith("https://") || ky.trim().length < 20) { setMsg("Vérifie : l’URL commence par https:// et la clé « anon public » est longue."); return; }
-    const c = { url: u.trim().replace(/\/$/, ""), anonKey: ky.trim() };
+    const m = u.trim().match(/https:\/\/[a-z0-9-]+\.supabase\.co/i);
+    const cle = ky.trim().replace(/^["'\s]+|["'\s]+$/g, "");
+    if (!m) { setMsg("L’adresse doit ressembler à https://xxxx.supabase.co (Settings → API → Project URL)."); return; }
+    if (cle.length < 20) { setMsg("Colle la clé « anon public » (ou « publishable ») complète."); return; }
+    const c = { url: m[0], anonKey: cle };
     localStorage.setItem(SUPA_CFG_KEY, JSON.stringify(c));
     setMsg(""); setCfg(c); setMode("chargement");
   };
@@ -2547,7 +2819,7 @@ function CloudGate() {
   return (
     <Ecran titre="Branche ta base de données ☁️">
       <p style={{ color: PALETTE.soft, fontSize: 13.5, marginTop: 0 }}>Une seule fois : colle les deux valeurs de ton projet Supabase (menu <b>Settings → API</b>). La clé « anon public » est faite pour vivre ici — tes données, elles, sont protégées par les règles de sécurité SQL.</p>
-      <input style={styleInput} placeholder="Project URL — https://xxxx.supabase.co" value={u} onChange={(e) => setU(e.target.value)} autoFocus />
+      <input style={styleInput} placeholder="Project URL — déjà rempli pour toi" value={u} onChange={(e) => setU(e.target.value)} autoFocus />
       <input style={styleInput} placeholder="Clé anon public — eyJhbGci…" value={ky} onChange={(e) => setKy(e.target.value)} />
       <button style={styleBtn} onClick={sauverCfg}>Connecter mon coffre au cloud</button>
       {msg && <p style={{ fontSize: 13, color: "#B0452F", marginTop: 12 }}>{msg}</p>}
